@@ -56,8 +56,16 @@ Objasnite glavne arhitekturne odluke bez ponavljanja popisa tehnologija. Ako va�
 
 | Komponenta | Odgovornost | Razlog za ovu granicu |
 | --- | --- | --- |
-|  |  |  |
-
+| **Web-klijent (EJS predlošci)** | Generira korisničko sučelje za prijavu, registraciju, predaju radova, pregled recenzija i javni program konferencije te šalje HTTP zahtjeve poslužitelju. | Korisnička interakcija i prikaz podataka odvojeni su od poslovne logike i trajne pohrane podataka. |
+| **HTTP sloj (Express rute i kontroleri)** | Obrađuje HTTP zahtjeve, provjerava sesiju ili JWT token, provodi autorizaciju i usmjerava zahtjeve prema odgovarajućim servisima. | Komunikacija preko HTTP-a i sigurnosne provjere izdvojene su od domenskih pravila sustava. |
+| **Domenski servisi i poslovna logika** | Implementiraju pravila predaje radova, upravljanje konferencijama i recenzijama, anonimizaciju podataka za dvostruko slijepu recenziju te koordiniraju provjeru PDF dokumenata i DOI oznaka. | Poslovna pravila izdvojena su iz kontrolera radi jednostavnijeg održavanja, ponovne uporabe i testiranja. |
+| **PdfService** | Provjerava format PDF datoteka, metapodatke dokumenta i potencijalne podatke koji bi mogli otkriti identitet autora. | Funkcionalnost validacije i anonimizacije dokumenata koristi se na više mjesta te je izdvojena u zaseban servis. |
+| **CrossrefService** | Komunicira s Crossref API-jem radi provjere valjanosti DOI oznaka navedenih u radu. | Integracija s vanjskim sustavom centralizirana je na jednom mjestu kako bi ostatak aplikacije bio neovisan o detaljima komunikacije. |
+| **Prisma ORM** | Omogućuje pristup relacijskoj bazi podataka, upravlja relacijama među entitetima i migracijama sheme baze. | Pristup podacima izoliran je od poslovne logike kako bi se smanjila izravna ovisnost o SQL upitima. |
+| **PostgreSQL baza podataka** | Trajno pohranjuje korisnike, konferencije, teme, radove, verzije radova, autore, recenzije i ostale povezane podatke. | Relacijska baza omogućuje očuvanje integriteta međusobno povezanih podataka putem stranih ključeva i ograničenja. |
+| **Datotečni sustav poslužitelja (`uploads/`)** | Pohranjuje PDF verzije predanih radova pod generiranim nazivima datoteka. | Binarne datoteke odvojene su od baze podataka kako bi se smanjila njezina veličina i omogućila jednostavnija obrada dokumenata. |
+| **ORCID API** | Omogućuje autentikaciju korisnika putem OAuth 2.0 protokola te dohvat ORCID identifikatora istraživača. | Vanjski sustav pruža potvrdu identiteta istraživača bez potrebe za implementacijom dodatnog mehanizma provjere. |
+Sustav **KonfTrack** implementiran je kao jedna web-aplikacija podijeljena na logičke komponente različitih odgovornosti. Korisničko sučelje generira se na poslužitelju, dok se poslovna pravila, pristup podacima i integracije s vanjskim sustavima nalaze u odvojenim modulima. Vanjske usluge ORCID i Crossref nalaze se izvan granice sustava te su dostupne kroz jasno definirana sučelja.
 Započnite crtanjem granice oko predloženog sustava. Unutar nje prepoznajte dijelove s različitim odgovornostima; planiranu bazu podataka aplikacije smjestite unutar granice, a usluge trećih strana izvan nje. Važne veze označite podatkom ili uslugom koja njima prolazi. Logička komponenta može biti modul unutar jedne poslužiteljske aplikacije: zaseban pravokutnik ne znači zasebno postavljenu uslugu. Tijekom implementacije ažurirajte dijagram kada se promijene odgovornosti ili veze. U završnoj inačici čitatelj treba moći povezati njegove dijelove s kodom. Dijagram razmještaja odgovara na pitanje gdje se ti dijelovi stvarno izvode.
 
 <details>
@@ -173,18 +181,23 @@ dok podatkovni entiteti odgovaraju modelima Prisma ORM-a.
 ## 4.4 Ponašanje tijekom izvođenja
 
 **Cilj:** Objasniti jednu važnu interakciju među dijelovima koji se izvode i životni ciklus jednog smislenog objekta. Odaberite primjere koji otkrivaju odluke ili neuspješne putove umjesto izrade dijagrama za svaku CRUD radnju.
-
 ### 4.4.1 Reprezentativni UML sekvencijski dijagram
 
 **Cilj:** Prikazati redoslijed poruka za jedan reprezentativni scenarij i odgovore na važnu alternativu.
 
-**Slika 4.4. Sekvencijski dijagram podnošenja prijave kriznog događaja**
+**Slika 4.4. Sekvencijski dijagram predaje znanstvenog rada**
 
 **Scenarij:** [Naziv interakcije; dodajte UC ID ako postoji.]  
 **sekvencijski dijagram:** ![Sekvencijski dijagram](./assets/diagrams/4-4-konftrack-report-submission-SD.svg)  
 **PlantUML izvor:** [izvor](./puml/4-4-konftrack-report-submission-SD.puml)
 
-
+**Opis toka interakcije:**
+1. **Slanje obrasca:** Prijavljeni autor putem web-sučelja ispunjava podatke o radu (konferencija, tema, naslov, sažetak, koautori, popis DOI referenci) i prilaže PDF datoteku te šalje zahtjev na `PaperController`.
+2. **Provjera ovlasti i roka:** Poslužitelj provjerava aktivnu sesiju/JWT korisnika te je li rok za predaju radova na odabranoj konferenciji još uvijek otvoren. Ako je rok istekao ili podaci nisu potpuni, zahtjev se odbija s porukom o pogrešci.
+3. **Provjera PDF rukopisa (`PdfService`):** Kontroler prosljeđuje datoteku servisu `PdfService`, koji provjerava je li datoteka valjani PDF i prelazi li najveći dopušteni broj stranica. Također provjerava sadrže li metapodaci PDF-a ime nekog od autora te u tom slučaju bilježi upozorenje o anonimnosti. Ako datoteka nije valjani PDF ili ima previše stranica, predaja se prekida.
+4. **Provjera DOI referenci (`CrossrefService`):** Za svaku unesenu DOI oznaku kontroler poziva `CrossrefService`, koji šalje upit vanjskom Crossref API-ju. Ako DOI ne postoji, sustav bilježi upozorenje. Ako je Crossref API privremeno nedostupan ili istekne vrijeme čekanja (*timeout*), sustav bilježi upozorenje, ali **ne sprječava predaju rada**.
+5. **Pohrana datoteke i upis u bazu:** PDF se sprema u mapu `uploads/` pod generiranim nazivom, a putem Prisma ORM-a u PostgreSQL bazu spremaju se zapisi o radu (`Paper`), autorima (`PaperAuthor`) i novoj verziji rukopisa (`PaperVersion`) sa stanjem *predan*.
+6. **Odgovor korisniku:** Poslužitelj vraća potvrdu o uspješnoj predaji zajedno s eventualnim upozorenjima (nepostojeći DOI ili ime autora u metapodacima PDF-a).
 
 ### 4.4.2 Reprezentativni UML dijagram stanja
 
@@ -194,6 +207,14 @@ dok podatkovni entiteti odgovaraju modelima Prisma ORM-a.
 **Dijagram stanja:** [Ugradite čitljiv UML dijagram stanja.]  
 **PlantUML izvor:** [Poveznica na odgovarajuću `.puml` datoteku.]
 
+**Pregled stanja i prijelaza objekta `Paper`:**
+* **Nacrt (`draft`):** Početno stanje kada autor spremi rad bez konačne predaje. Obavezna polja i PDF još nisu obavezni, a rad nije vidljiv programskom odboru. Autor može uređivati rad ili ga konačno predati.
+* **Predan (`submitted`):** Autor je potvrdio predaju rada prije isteka roka uz valjani PDF rukopis. Rad ulazi u sustav konferencije. Iz ovog stanja autor može povući rad, ili ga predsjednik programskog odbora dodjeljuje recenzentima.
+* **U recenziji (`under_review`):** Rad je dodijeljen recenzentima i provodi se dvostruko slijepa recenzija. Autor više ne može mijenjati rukopis, ali i dalje može povući rad.
+* **Potrebna revizija (`revision_required`):** Predsjednik programskog odbora na temelju recenzija traži doradu rada. Autor dobiva uvid u anonimizirane recenzije i može predati novu verziju rukopisa (`PaperVersion`), čime se rad vraća u postupak pregleda.
+* **Prihvaćen (`accepted`):** Predsjednik programskog odbora donosi odluku o prihvaćanju rada za izlaganje i objavu u programu konferencije.
+* **Odbijen (`rejected`):** Konačno stanje kada predsjednik programskog odbora odbije rad na temelju recenzija. Daljnje izmjene niti ponovna predaja istog rada nisu dopuštene.
+* **Povučen (`withdrawn`):** Konačno stanje u koje rad prelazi kada ga autor samoinicijativno povuče iz postupka. Rad ostaje evidentiran u bazi radi sljedivosti, ali se isključuje iz daljnje recenzije i programa.
 <details>
 <summary><strong>Složeno stanje sustava: koordinacija događaja i dostupnost usluge</strong></summary>
 
